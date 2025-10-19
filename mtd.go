@@ -7,11 +7,12 @@ import (
 	"math"
 	"os"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/gocolly/colly"
 	"github.com/piquette/finance-go/chart"
+	"github.com/piquette/finance-go/datetime"
+	"github.com/shopspring/decimal"
 )
 
 // ------------------------------------
@@ -50,13 +51,13 @@ func getMonthRange(year int, month time.Month) (time.Time, time.Time) {
 func getMTDReturn(ticker string, start, end time.Time) (float64, error) {
 	params := &chart.Params{
 		Symbol:   ticker,
-		Start:    chart.Time(start),
-		End:      chart.Time(end),
-		Interval: chart.Interval1d,
+		Start:    datetime.FromUnix(int(start.Unix())),
+		End:      datetime.FromUnix(int(end.Unix())),
+		Interval: datetime.OneDay,
 	}
 
 	iter := chart.Get(params)
-	var firstClose, lastClose float64
+	var firstClose, lastClose decimal.Decimal
 	firstSet := false
 
 	for iter.Next() {
@@ -71,12 +72,13 @@ func getMTDReturn(ticker string, start, end time.Time) (float64, error) {
 	if err := iter.Err(); err != nil {
 		return math.NaN(), err
 	}
-	if !firstSet || firstClose == 0 {
+	if !firstSet || firstClose.IsZero() {
 		return math.NaN(), fmt.Errorf("no data")
 	}
 
-	mtd := (lastClose / firstClose) - 1
-	return mtd, nil
+	mtd := lastClose.Div(firstClose).Sub(decimal.NewFromInt(1))
+	mtdFloat, _ := mtd.Float64()
+	return mtdFloat, nil
 }
 
 // ------------------------------------

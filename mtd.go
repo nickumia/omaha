@@ -49,6 +49,8 @@ func getMonthRange(year int, month time.Month) (time.Time, time.Time) {
 // Step 3: Compute MTD return from Yahoo
 // ------------------------------------
 func getMTDReturn(ticker string, start, end time.Time) (float64, error) {
+	fmt.Printf("🔍 Fetching data for %s from %s to %s\n", ticker, start.Format("2006-01-02"), end.Format("2006-01-02"))
+	
 	params := &chart.Params{
 		Symbol:   ticker,
 		Start:    datetime.FromUnix(int(start.Unix())),
@@ -59,22 +61,37 @@ func getMTDReturn(ticker string, start, end time.Time) (float64, error) {
 	iter := chart.Get(params)
 	var firstClose, lastClose decimal.Decimal
 	firstSet := false
+	barCount := 0
 
 	for iter.Next() {
 		bar := iter.Bar()
+		barCount++
 		if !firstSet {
 			firstClose = bar.Close
 			firstSet = true
+			fmt.Printf("📅 First close for %s: %v on %v\n", ticker, bar.Close, time.Unix(int64(bar.Timestamp), 0).Format("2006-01-02"))
 		}
 		lastClose = bar.Close
 	}
 
 	if err := iter.Err(); err != nil {
-		return math.NaN(), err
+		errMsg := fmt.Sprintf("❌ Error fetching data for %s: %v", ticker, err)
+		// Try to extract more details if it's a finance-go error
+		if ferr, ok := err.(interface{ Code() string }); ok {
+			errMsg += fmt.Sprintf(" (Code: %s)", ferr.Code())
+		}
+		if ferr, ok := err.(interface{ Detail() string }); ok {
+			errMsg += fmt.Sprintf(" (Detail: %s)", ferr.Detail())
+		}
+		fmt.Println(errMsg)
+		return math.NaN(), fmt.Errorf(errMsg)
 	}
 	if !firstSet || firstClose.IsZero() {
+		fmt.Printf("⚠️  No data found for %s\n", ticker)
 		return math.NaN(), fmt.Errorf("no data")
 	}
+	
+	fmt.Printf("✅ Processed %s: %d bars, first: %v, last: %v\n", ticker, barCount, firstClose, lastClose)
 
 	mtd := lastClose.Div(firstClose).Sub(decimal.NewFromInt(1))
 	mtdFloat, _ := mtd.Float64()
@@ -94,7 +111,10 @@ func main() {
 	month := time.September // change this as needed
 	start, end := getMonthRange(year, month)
 
-	fmt.Printf("📅 Fetching S&P 500 MTD returns for %s %d...\n", month, year)
+	fmt.Printf("📅 Fetching S&P 500 MTD returns for %s %d (from %s to %s)...\n", 
+		month, year, 
+		start.Format("2006-01-02"), 
+		end.Format("2006-01-02"))
 
 	tickers, err := getSP500Tickers()
 	if err != nil {
@@ -105,11 +125,13 @@ func main() {
 	total := len(tickers)
 	for i, t := range tickers {
 		mtd, err := getMTDReturn(t, start, end)
-		if err == nil && !math.IsNaN(mtd) {
+		if err != nil {
+			log.Printf("Skipping %s: %v", t, err)
+		} else if !math.IsNaN(mtd) {
 			results = append(results, Result{Ticker: t, Return: mtd})
 		}
-		if (i+1)%25 == 0 {
-			fmt.Printf("Processed %d/%d...\n", i+1, total)
+		if (i+1)%5 == 0 {  // More frequent updates
+			fmt.Printf("Processed %d/%d... (Found %d valid results so far)\n", i+1, total, len(results))
 		}
 	}
 

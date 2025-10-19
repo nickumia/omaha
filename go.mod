@@ -7,6 +7,7 @@ toolchain go1.24.9
 require (
 	github.com/gocolly/colly v1.2.0
 	github.com/piquette/finance-go v1.1.0
+	github.com/shopspring/decimal v1.4.0
 )
 
 require (
@@ -20,10 +21,11 @@ require (
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/kennygrant/sanitize v1.2.4 // indirect
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d // indirect
-	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/temoto/robotstxt v1.1.2 // indirect
 	golang.org/x/net v0.46.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.26.0 // indirect
 )
+
+replace github.com/piquette/finance-go => github.com/psanford/finance-go v0.0.0-20250222221941-906a725c60a0

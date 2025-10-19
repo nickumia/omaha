@@ -80,9 +80,9 @@ func getSP500Tickers() ([]string, error) {
 // ------------------------------------
 // Step 2: Get month start and end
 // ------------------------------------
-func getMonthRange(year int, month time.Month) (time.Time, time.Time) {
-	start := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
-	end := start.AddDate(0, 1, 0)
+func getMonthRange(year int, month time.Month, day int) (time.Time, time.Time) {
+	start := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	end := start.AddDate(0, 1, -1)
 	return start, end
 }
 
@@ -161,14 +161,16 @@ type Result struct {
 	LastClose  string
 }
 
-func main() {
-	// Use the previous month to ensure data is available
-	now := time.Now()
-	firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	firstOfLastMonth := firstOfThisMonth.AddDate(0, -1, 0)
-	year := firstOfLastMonth.Year()
-	month := firstOfLastMonth.Month()
-	start, end := getMonthRange(year, month)
+// getMTDResults fetches month-to-date returns for a specific month and year
+// If year and month are 0, it will use the previous month
+func getMTDResults(year int, month time.Month, day int) ([]Result, error) {
+	// If year and month are not provided, use previous month
+	if year == 0 || month == 0 {
+		lastMonth := time.Now().AddDate(0, -1, 0)
+		year, month, day = lastMonth.Year(), lastMonth.Month(), lastMonth.Day()
+	}
+
+	start, end := getMonthRange(year, month, day)
 
 	fmt.Printf("📅 Fetching S&P 500 MTD returns for %s %d (from %s to %s)...\n", 
 		month, year, 
@@ -257,11 +259,24 @@ func main() {
 			r.LastClose,
 		})
 	}
+	log.Println("✅ Saved results to sp500_mtd_returns.csv")
 
-	fmt.Println("✅ Saved results to sp500_mtd_returns.csv")
-	fmt.Println("🏁 Top 10 performers:")
-	for i := 0; i < 10 && i < len(validResults); i++ {
-		r := validResults[i]
-		fmt.Printf("%-6s  %6.2f%%\n", r.Ticker, r.Return*100)
-	}
+	return validResults, nil
+}
+
+func main() {
+	// Initialize the server
+	server := NewServer()
+
+	// Start the server in a goroutine
+	go func() {
+		if err := server.Start(":8080"); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
+	}()
+
+	log.Println("🚀 Server started. Use the refresh button in the UI to load data.")
+
+	// Keep the program running
+	select {}
 }

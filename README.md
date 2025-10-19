@@ -1,6 +1,6 @@
 # Omaha
 
-A Stock Recommender aimed at making high profit through 30-day holding periods. This tool fetches and analyzes S&P 500 stock performance data, providing month-to-date returns and sector-based analytics.
+(Aspirational) A Stock Recommender aimed at making high profit through 30-day holding periods. This tool fetches and analyzes S&P 500 stock performance data, providing month-to-date returns and sector-based analytics.
 
 ## Features
 

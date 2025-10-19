@@ -21,6 +21,7 @@ import (
 // ------------------------------------
 const (
 	maxErrors = 20 // Maximum number of errors before giving up
+	debug     = false // Set to true for debug output
 )
 
 // Global error counter
@@ -85,8 +86,17 @@ func getMonthRange(year int, month time.Month) (time.Time, time.Time) {
 // ------------------------------------
 // Step 3: Compute MTD return from Yahoo
 // ------------------------------------
-func getMTDReturn(ticker string, start, end time.Time) (float64, error) {
-	fmt.Printf("🔍 Fetching data for %s from %s to %s\n", ticker, start.Format("2006-01-02"), end.Format("2006-01-02"))
+type MTDResult struct {
+	Return     float64
+	BarCount   int
+	FirstClose decimal.Decimal
+	LastClose  decimal.Decimal
+}
+
+func getMTDReturn(ticker string, start, end time.Time) (MTDResult, error) {
+	if debug {
+		fmt.Printf("🔍 Fetching data for %s from %s to %s\n", ticker, start.Format("2006-01-02"), end.Format("2006-01-02"))
+	}
 	
 	params := &chart.Params{
 		Symbol:   ticker,
@@ -106,7 +116,6 @@ func getMTDReturn(ticker string, start, end time.Time) (float64, error) {
 		if !firstSet {
 			firstClose = bar.Close
 			firstSet = true
-			fmt.Printf("📅 First close for %s: %v on %v\n", ticker, bar.Close, time.Unix(int64(bar.Timestamp), 0).Format("2006-01-02"))
 		}
 		lastClose = bar.Close
 	}
@@ -121,26 +130,32 @@ func getMTDReturn(ticker string, start, end time.Time) (float64, error) {
 			errMsg += fmt.Sprintf(" (Detail: %s)", ferr.Detail())
 		}
 		fmt.Println(errMsg)
-		return math.NaN(), fmt.Errorf(errMsg)
+		return MTDResult{Return: math.NaN()}, fmt.Errorf(errMsg)
 	}
 	if !firstSet || firstClose.IsZero() {
 		fmt.Printf("⚠️  No data found for %s\n", ticker)
-		return math.NaN(), fmt.Errorf("no data")
+		return MTDResult{Return: math.NaN()}, fmt.Errorf("no data")
 	}
-	
-	fmt.Printf("✅ Processed %s: %d bars, first: %v, last: %v\n", ticker, barCount, firstClose, lastClose)
 
 	mtd := lastClose.Div(firstClose).Sub(decimal.NewFromInt(1))
 	mtdFloat, _ := mtd.Float64()
-	return mtdFloat, nil
+	return MTDResult{
+		Return:     mtdFloat,
+		BarCount:   barCount,
+		FirstClose: firstClose,
+		LastClose:  lastClose,
+	}, nil
 }
 
 // ------------------------------------
 // Step 4: Main
 // ------------------------------------
 type Result struct {
-	Ticker string
-	Return float64
+	Ticker     string
+	Return     float64
+	BarCount   int
+	FirstClose string
+	LastClose  string
 }
 
 func main() {
@@ -165,13 +180,19 @@ func main() {
 	results := []Result{}
 	total := len(tickers)
 	for i, t := range tickers {
-		mtd, err := getMTDReturn(t, start, end)
+		result, err := getMTDReturn(t, start, end)
 		if err != nil {
 			log.Printf("Skipping %s: %v", t, err)
-		} else if !math.IsNaN(mtd) {
-			results = append(results, Result{Ticker: t, Return: mtd})
+		} else if !math.IsNaN(result.Return) {
+			results = append(results, Result{
+				Ticker:     t,
+				Return:     result.Return,
+				BarCount:   result.BarCount,
+				FirstClose: result.FirstClose.String(),
+				LastClose:  result.LastClose.String(),
+			})
 		}
-		if (i+1)%5 == 0 {  // More frequent updates
+		if (i+1)%50 == 0 {  // More frequent updates
 			fmt.Printf("Processed %d/%d... (Found %d valid results so far)\n", i+1, total, len(results))
 		}
 	}
@@ -190,10 +211,17 @@ func main() {
 
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
-	writer.Write([]string{"Ticker", "MTD_Return", "MTD_%"} )
+	writer.Write([]string{"Ticker", "MTD_Return", "MTD_%", "Bars", "First_Close", "Last_Close"})
 
 	for _, r := range results {
-		writer.Write([]string{r.Ticker, fmt.Sprintf("%.6f", r.Return), fmt.Sprintf("%.2f", r.Return*100)})
+		writer.Write([]string{
+			r.Ticker,
+			fmt.Sprintf("%.6f", r.Return),
+			fmt.Sprintf("%.2f", r.Return*100),
+			fmt.Sprintf("%d", r.BarCount),
+			r.FirstClose,
+			r.LastClose,
+		})
 	}
 
 	fmt.Println("✅ Saved results to sp500_mtd_returns.csv")

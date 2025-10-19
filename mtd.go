@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/csv"
 	"fmt"
 	"log"
@@ -33,15 +32,17 @@ var errorCount int
 // ------------------------------------
 // Step 1: Get S&P 500 tickers
 // ------------------------------------
-func getSP500Tickers() ([]string, error) {
+func getSP500Tickers() ([]string, []string, error) {
 	url := "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 	c := colly.NewCollector()
 	var tickers []string
+	var sectors []string
 	errorCount = 0 // Reset error counter at start
 
 	c.OnHTML("table.wikitable tbody tr", func(e *colly.HTMLElement) {
 		// Get the first column (ticker symbol) from each row
 		ticker := e.ChildText("td:nth-child(1) a")
+		sector := e.ChildText("td:nth-child(3)")
 		// If no link, try getting the text directly
 		if ticker == "" {
 			ticker = e.ChildText("td:nth-child(1)")
@@ -50,6 +51,7 @@ func getSP500Tickers() ([]string, error) {
 		ticker = strings.TrimSpace(ticker)
 		if ticker != "" && ticker != "Symbol" && len(ticker) < 10 { // Basic validation
 			tickers = append(tickers, ticker)
+			sectors = append(sectors, sector)
 		}
 	})
 
@@ -66,15 +68,15 @@ func getSP500Tickers() ([]string, error) {
 
 	fmt.Println("Fetching S&P 500 tickers from Wikipedia...")
 	if err := c.Visit(url); err != nil {
-		return nil, fmt.Errorf("error visiting %s: %v", url, err)
+		return nil, nil, fmt.Errorf("error visiting %s: %v", url, err)
 	}
 
 	if len(tickers) == 0 {
-		return nil, fmt.Errorf("no tickers found on the page")
+		return nil, nil, fmt.Errorf("no tickers found on the page")
 	}
 
 	fmt.Printf("Found %d tickers\n", len(tickers))
-	return tickers, nil
+	return tickers, sectors, nil
 }
 
 // ------------------------------------
@@ -155,10 +157,110 @@ func getMTDReturn(ticker string, start, end time.Time) (MTDResult, error) {
 // ------------------------------------
 type Result struct {
 	Ticker     string
+	Sector     string
 	Return     float64
 	BarCount   int
 	FirstClose string
 	LastClose  string
+}
+
+type SectorReturn struct {
+	Sector      string
+	AvgReturn   float64
+	TickerCount int
+}
+
+// calculateSectorReturns calculates average returns by sector
+func calculateSectorReturns(results []Result) []SectorReturn {
+	sectorMap := make(map[string]struct {
+		totalReturn float64
+		count       int
+	})
+
+	// Calculate total returns per sector
+	for _, r := range results {
+		if r.Sector == "" {
+			continue
+		}
+		sector := sectorMap[r.Sector]
+		sector.totalReturn += r.Return
+		sector.count++
+		sectorMap[r.Sector] = sector
+	}
+
+	// Calculate average returns
+	var sectorReturns []SectorReturn
+	for sector, data := range sectorMap {
+		if data.count > 0 {
+			sectorReturns = append(sectorReturns, SectorReturn{
+				Sector:      sector,
+				AvgReturn:   data.totalReturn / float64(data.count),
+				TickerCount: data.count,
+			})
+		}
+	}
+
+	// Sort by average return (descending)
+	sort.Slice(sectorReturns, func(i, j int) bool {
+		return sectorReturns[i].AvgReturn > sectorReturns[j].AvgReturn
+	})
+
+	return sectorReturns
+}
+
+// writeResultsToCSV writes both individual ticker data and sector summary to a CSV file
+func writeResultsToCSV(results []Result, sectorReturns []SectorReturn, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create CSV: %v", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header for ticker data
+	if err := writer.Write([]string{"Ticker", "Sector", "Return", "MTD_%", "Bars", "First_Close", "Last_Close"}); err != nil {
+		return err
+	}
+
+	// Write individual ticker data
+	for _, r := range results {
+		if err := writer.Write([]string{
+			r.Ticker,
+			r.Sector,
+			fmt.Sprintf("%.6f", r.Return),
+			fmt.Sprintf("%.2f%%", r.Return*100),
+			fmt.Sprintf("%d", r.BarCount),
+			r.FirstClose,
+			r.LastClose,
+		}); err != nil {
+			return err
+		}
+	}
+
+	// Add a separator
+	if err := writer.Write([]string{""}); err != nil {
+		return err
+	}
+
+	// Write sector summary header
+	if err := writer.Write([]string{"Sector", "Avg_Return", "Ticker_Count"}); err != nil {
+		return err
+	}
+
+	// Write sector data
+	for _, sr := range sectorReturns {
+		if err := writer.Write([]string{
+			sr.Sector,
+			fmt.Sprintf("%.2f%%", sr.AvgReturn*100),
+			fmt.Sprintf("%d", sr.TickerCount),
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // getMTDResults fetches month-to-date returns for a specific month and year
@@ -177,21 +279,24 @@ func getMTDResults(year int, month time.Month, day int) ([]Result, error) {
 		start.Format("2006-01-02"), 
 		end.Format("2006-01-02"))
 
-	tickers, err := getSP500Tickers()
+	tickers, sectors, err := getSP500Tickers()
 	if err != nil {
 		log.Fatalf("Failed to get tickers: %v", err)
 	}
 
+	// Create a map to store sector data
+	sectorData := make(map[string]struct {
+		totalReturn float64
+		count       int
+	})
+
 	// Process tickers in parallel
 	type jobResult struct {
 		ticker string
+		sector string
 		result MTDResult
 		err    error
 	}
-
-	// Create a context with timeout (30 minutes should be enough for all requests)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
 
 	// Calculate number of workers (use number of CPU cores * 2, but not more than maxWorkers to avoid rate limiting)
 	workers := runtime.NumCPU() * 2
@@ -199,33 +304,68 @@ func getMTDResults(year int, month time.Month, day int) ([]Result, error) {
 		workers = maxWorkers
 	}
 
-	// Process function for parallel execution
-	processFunc := func(ticker string) (Result, error) {
-		result, err := getMTDReturn(ticker, start, end)
-		if err != nil {
-			return Result{Ticker: ticker}, err
-		}
-		if math.IsNaN(result.Return) {
-			return Result{Ticker: ticker}, fmt.Errorf("invalid return value for %s", ticker)
-		}
-		return Result{
-			Ticker:     ticker,
-			Return:     result.Return,
-			BarCount:   result.BarCount,
-			FirstClose: result.FirstClose.String(),
-			LastClose:  result.LastClose.String(),
-		}, nil
+	// Process tickers in parallel using a worker pool
+	numTickers := len(tickers)
+	jobs := make(chan jobResult, numTickers)
+	results := make(chan jobResult, numTickers)
+
+	// Start workers
+	for w := 0; w < workers; w++ {
+		go func() {
+			for j := range jobs {
+				result, err := getMTDReturn(j.ticker, start, end)
+				if err != nil {
+					results <- jobResult{ticker: j.ticker, sector: j.sector, err: err}
+					continue
+				}
+				results <- jobResult{ticker: j.ticker, sector: j.sector, result: result}
+			}
+		}()
 	}
 
-	// Process in parallel
-	results, errs := ProcessInParallel(ctx, tickers, processFunc, workers)
-
-	// Filter out errors and log them
-	var validResults []Result
-	for _, res := range results {
-		if res.Ticker != "" { // Valid result
-			validResults = append(validResults, res)
+	// Send jobs
+	go func() {
+		for i, ticker := range tickers {
+			sector := "Unknown"
+			if i < len(sectors) {
+				sector = sectors[i]
+			}
+			jobs <- jobResult{ticker: ticker, sector: sector}
 		}
+		close(jobs)
+	}()
+
+	// Collect results
+	var validResults []Result
+	var errs []error
+
+	for i := 0; i < numTickers; i++ {
+		res := <-results
+		if res.err != nil {
+			errs = append(errs, fmt.Errorf("%s: %v", res.ticker, res.err))
+			continue
+		}
+
+		result := Result{
+			Ticker:     res.ticker,
+			Sector:     res.sector,
+			Return:     res.result.Return,
+			BarCount:   res.result.BarCount,
+			FirstClose: res.result.FirstClose.String(),
+			LastClose:  res.result.LastClose.String(),
+		}
+		validResults = append(validResults, result)
+
+		// Update sector data
+		sd := sectorData[res.sector]
+		sd.totalReturn += result.Return
+		sd.count++
+		sectorData[res.sector] = sd
+	}
+
+	// Log any errors
+	if len(errs) > 0 {
+		log.Printf("Completed with %d errors during processing\n", len(errs))
 	}
 
 	// Log any errors from parallel processing
@@ -238,28 +378,36 @@ func getMTDResults(year int, month time.Month, day int) ([]Result, error) {
 		return validResults[i].Return > validResults[j].Return
 	})
 
-	// Write CSV
-	file, err := os.Create("sp500_mtd_returns.csv")
-	if err != nil {
-		log.Fatalf("Failed to create CSV: %v", err)
-	}
-	defer file.Close()
-
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
-	writer.Write([]string{"Ticker", "MTD_Return", "MTD_%", "Bars", "First_Close", "Last_Close"})
-
-	for _, r := range validResults {
-		writer.Write([]string{
-			r.Ticker,
-			fmt.Sprintf("%.6f", r.Return),
-			fmt.Sprintf("%.2f%%", r.Return*100),
-			fmt.Sprintf("%d", r.BarCount),
-			r.FirstClose,
-			r.LastClose,
+	// Convert sector data to slice for sorting
+	var sectorReturns []SectorReturn
+	for sector, data := range sectorData {
+		sectorReturns = append(sectorReturns, SectorReturn{
+			Sector:      sector,
+			AvgReturn:   data.totalReturn / float64(data.count),
+			TickerCount: data.count,
 		})
 	}
-	log.Println("✅ Saved results to sp500_mtd_returns.csv")
+
+	// Sort by average return (descending)
+	sort.Slice(sectorReturns, func(i, j int) bool {
+		return sectorReturns[i].AvgReturn > sectorReturns[j].AvgReturn
+	})
+
+	// Write results to CSV
+	outputFile := "sp500_mtd_returns.csv"
+	if err := writeResultsToCSV(validResults, sectorReturns, outputFile); err != nil {
+		log.Printf("Warning: Failed to write CSV: %v", err)
+	} else {
+		log.Printf("✅ Saved results to %s\n", outputFile)
+
+		// Log top 5 sectors
+		log.Println("\n🏆 Top 5 Performing Sectors:")
+		for i := 0; i < 5 && i < len(sectorReturns); i++ {
+			sr := sectorReturns[i]
+			log.Printf("%-30s %6.2f%% (%d tickers)", 
+				sr.Sector + ":", sr.AvgReturn*100, sr.TickerCount)
+		}
+	}
 
 	return validResults, nil
 }

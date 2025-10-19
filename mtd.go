@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gocolly/colly"
@@ -16,23 +17,59 @@ import (
 )
 
 // ------------------------------------
+// Configuration
+// ------------------------------------
+const (
+	maxErrors = 20 // Maximum number of errors before giving up
+)
+
+// Global error counter
+var errorCount int
+
+// ------------------------------------
 // Step 1: Get S&P 500 tickers
 // ------------------------------------
 func getSP500Tickers() ([]string, error) {
 	url := "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 	c := colly.NewCollector()
 	var tickers []string
+	errorCount = 0 // Reset error counter at start
 
 	c.OnHTML("table.wikitable tbody tr", func(e *colly.HTMLElement) {
-		ticker := e.ChildText("td:nth-child(1)")
-		if ticker != "" && ticker != "Symbol" {
+		// Get the first column (ticker symbol) from each row
+		ticker := e.ChildText("td:nth-child(1) a")
+		// If no link, try getting the text directly
+		if ticker == "" {
+			ticker = e.ChildText("td:nth-child(1)")
+		}
+		// Clean up and validate the ticker
+		ticker = strings.TrimSpace(ticker)
+		if ticker != "" && ticker != "Symbol" && len(ticker) < 10 { // Basic validation
 			tickers = append(tickers, ticker)
 		}
 	})
 
+	// Set error handler
+	c.OnError(func(r *colly.Response, err error) {
+		errorCount++
+		log.Printf("Error %d/%d - URL: %s failed with response: %v\nError: %v", 
+			errorCount, maxErrors, r.Request.URL, r.StatusCode, err)
+		
+		if errorCount >= maxErrors {
+			log.Fatalf("Reached maximum number of errors (%d). Exiting...", maxErrors)
+		}
+	})
+
+	fmt.Println("Fetching S&P 500 tickers from Wikipedia...")
 	if err := c.Visit(url); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error visiting %s: %v", url, err)
 	}
+
+	if len(tickers) == 0 {
+		return nil, fmt.Errorf("no tickers found on the page")
+	}
+
+	fmt.Printf("Found %d tickers\n", len(tickers))
 	return tickers, nil
 }
 
@@ -107,8 +144,12 @@ type Result struct {
 }
 
 func main() {
-	year := 2025
-	month := time.September // change this as needed
+	// Use the previous month to ensure data is available
+	now := time.Now()
+	firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	firstOfLastMonth := firstOfThisMonth.AddDate(0, -1, 0)
+	year := firstOfLastMonth.Year()
+	month := firstOfLastMonth.Month()
 	start, end := getMonthRange(year, month)
 
 	fmt.Printf("📅 Fetching S&P 500 MTD returns for %s %d (from %s to %s)...\n", 

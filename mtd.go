@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
 	"log"
 	"math"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -20,8 +22,9 @@ import (
 // Configuration
 // ------------------------------------
 const (
-	maxErrors = 20 // Maximum number of errors before giving up
-	debug     = false // Set to true for debug output
+	maxErrors   = 20   // Maximum number of errors before giving up
+	debug       = false // Set to true for debug output
+	maxWorkers  = 10    // Maximum number of concurrent workers
 )
 
 // Global error counter
@@ -177,29 +180,60 @@ func main() {
 		log.Fatalf("Failed to get tickers: %v", err)
 	}
 
-	results := []Result{}
-	total := len(tickers)
-	for i, t := range tickers {
-		result, err := getMTDReturn(t, start, end)
+	// Process tickers in parallel
+	type jobResult struct {
+		ticker string
+		result MTDResult
+		err    error
+	}
+
+	// Create a context with timeout (30 minutes should be enough for all requests)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	// Calculate number of workers (use number of CPU cores * 2, but not more than maxWorkers to avoid rate limiting)
+	workers := runtime.NumCPU() * 2
+	if workers > maxWorkers {
+		workers = maxWorkers
+	}
+
+	// Process function for parallel execution
+	processFunc := func(ticker string) (Result, error) {
+		result, err := getMTDReturn(ticker, start, end)
 		if err != nil {
-			log.Printf("Skipping %s: %v", t, err)
-		} else if !math.IsNaN(result.Return) {
-			results = append(results, Result{
-				Ticker:     t,
-				Return:     result.Return,
-				BarCount:   result.BarCount,
-				FirstClose: result.FirstClose.String(),
-				LastClose:  result.LastClose.String(),
-			})
+			return Result{Ticker: ticker}, err
 		}
-		if (i+1)%50 == 0 {  // More frequent updates
-			fmt.Printf("Processed %d/%d... (Found %d valid results so far)\n", i+1, total, len(results))
+		if math.IsNaN(result.Return) {
+			return Result{Ticker: ticker}, fmt.Errorf("invalid return value for %s", ticker)
+		}
+		return Result{
+			Ticker:     ticker,
+			Return:     result.Return,
+			BarCount:   result.BarCount,
+			FirstClose: result.FirstClose.String(),
+			LastClose:  result.LastClose.String(),
+		}, nil
+	}
+
+	// Process in parallel
+	results, errs := ProcessInParallel(ctx, tickers, processFunc, workers)
+
+	// Filter out errors and log them
+	var validResults []Result
+	for _, res := range results {
+		if res.Ticker != "" { // Valid result
+			validResults = append(validResults, res)
 		}
 	}
 
-	// Sort by return descending
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Return > results[j].Return
+	// Log any errors from parallel processing
+	if len(errs) > 0 {
+		log.Printf("Completed with %d errors during processing\n", len(errs))
+	}
+
+	// Sort valid results by return descending
+	sort.Slice(validResults, func(i, j int) bool {
+		return validResults[i].Return > validResults[j].Return
 	})
 
 	// Write CSV
@@ -213,11 +247,11 @@ func main() {
 	defer writer.Flush()
 	writer.Write([]string{"Ticker", "MTD_Return", "MTD_%", "Bars", "First_Close", "Last_Close"})
 
-	for _, r := range results {
+	for _, r := range validResults {
 		writer.Write([]string{
 			r.Ticker,
 			fmt.Sprintf("%.6f", r.Return),
-			fmt.Sprintf("%.2f", r.Return*100),
+			fmt.Sprintf("%.2f%%", r.Return*100),
 			fmt.Sprintf("%d", r.BarCount),
 			r.FirstClose,
 			r.LastClose,
@@ -226,7 +260,8 @@ func main() {
 
 	fmt.Println("✅ Saved results to sp500_mtd_returns.csv")
 	fmt.Println("🏁 Top 10 performers:")
-	for i := 0; i < 10 && i < len(results); i++ {
-		fmt.Printf("%-6s  %6.2f%%\n", results[i].Ticker, results[i].Return*100)
+	for i := 0; i < 10 && i < len(validResults); i++ {
+		r := validResults[i]
+		fmt.Printf("%-6s  %6.2f%%\n", r.Ticker, r.Return*100)
 	}
 }
